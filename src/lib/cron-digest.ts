@@ -96,6 +96,25 @@ export function isFullListEnabled(): boolean {
   return raw === "true" || raw === "1" || raw === "yes";
 }
 
+/**
+ * Org timezone used to render freeze windows in the digest. Mirrors the
+ * resolution used by `src/lib/freeze-window.ts` so operator-facing copy stays
+ * consistent with the freeze-status API. Falls back to UTC when unset or
+ * invalid so digests never fail on a bad env value.
+ */
+export function getDigestOrgTimezone(): string {
+  const raw = process.env.ORG_TIMEZONE?.trim();
+  if (!raw) return "UTC";
+  try {
+    // Throws RangeError for unknown IANA zones.
+    new Intl.DateTimeFormat("en-US", { timeZone: raw });
+    return raw;
+  } catch {
+    logger.warn("cron_digest_invalid_org_timezone", { timezone: raw });
+    return "UTC";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Rate gate (in-process; mirrors cron-export.ts)
 // ---------------------------------------------------------------------------
@@ -164,8 +183,14 @@ export async function runCronDigest(
   const startedAt = new Date(now).toISOString();
   const cadence = options.cadence ?? getConfiguredCadence();
   const includeFullList = isFullListEnabled();
+  const orgTimezone = getDigestOrgTimezone();
 
-  logger.info("cron_digest_started", { startedAt, cadence, includeFullList });
+  logger.info("cron_digest_started", {
+    startedAt,
+    cadence,
+    includeFullList,
+    orgTimezone,
+  });
 
   try {
     // ── Fetch all active registrations ───────────────────────────────────────
@@ -227,6 +252,7 @@ export async function runCronDigest(
         notReadyCount,
         notReadyList: includeFullList ? notReadyList : undefined,
         generatedAt: startedAt,
+        orgTimezone,
       });
 
       const cadenceLabel = cadence === "weekly" ? "Weekly" : "Daily";
@@ -250,64 +276,4 @@ export async function runCronDigest(
 
     await recordAuditLog({
       action: "digest.cron",
-      actorId: options.actorId ?? null,
-      actorLogin: options.actorLogin ?? "scheduler:cron",
-      metadata: {
-        cadence,
-        totalContributors,
-        readyCount,
-        lowReserveCount,
-        notReadyCount,
-        includeFullList,
-        destination: destination || "none",
-        emailSent,
-        durationMs,
-      },
-    });
-
-    lastResult = {
-      status: "ok",
-      startedAt,
-      durationMs,
-      cadence,
-      totalContributors,
-      readyCount,
-      lowReserveCount,
-      notReadyCount,
-      notReadyList: includeFullList ? notReadyList : undefined,
-      destination: destination || undefined,
-      emailSent,
-    };
-
-    logger.info("cron_digest_completed", {
-      totalContributors,
-      readyCount,
-      notReadyCount,
-      cadence,
-      durationMs,
-    });
-
-    return lastResult;
-  } catch (error) {
-    const durationMs = Date.now() - now;
-    const message = error instanceof Error ? error.message : String(error);
-
-    logger.error("cron_digest_failed", { error: message, durationMs });
-
-    await recordAuditLog({
-      action: "digest.cron.failed",
-      actorId: options.actorId ?? null,
-      actorLogin: options.actorLogin ?? "scheduler:cron",
-      metadata: { error: message, durationMs },
-    });
-
-    lastResult = {
-      status: "error",
-      startedAt,
-      durationMs,
-      error: message,
-    };
-
-    return lastResult;
-  }
-}
+      actorId: options
